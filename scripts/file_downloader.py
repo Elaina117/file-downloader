@@ -3,7 +3,6 @@ import subprocess
 import urllib.parse
 import requests
 import signal
-import time
 from modules import script_callbacks, shared
 import gradio as gr
 
@@ -14,7 +13,6 @@ class Downloader:
     
     def cancel_download(self):
         if self.process:
-            # Windowsの場合はCTRL_BREAK_EVENT、それ以外はSIGTERM
             if os.name == 'nt':
                 self.process.send_signal(signal.CTRL_BREAK_EVENT)
             else:
@@ -26,7 +24,6 @@ class Downloader:
 downloader = Downloader()
 
 def get_model_path(model_type):
-    """モデルタイプに応じたパスを返す"""
     paths = {
         'ckpt': 'models/Stable-diffusion',
         'vae': 'models/VAE',
@@ -34,24 +31,63 @@ def get_model_path(model_type):
     }
     return paths.get(model_type, '')
 
-def get_filename_from_url(url):
-    """URLからファイル名を取得"""
+def check_download_availability(url):
+    """
+    URLのダウンロード可否とファイル名を確認
+    戻り値: (可否, ファイル名, エラーメッセージ)
+    """
     try:
-        response = requests.head(url, allow_redirects=True)
+        # タイムアウトを設定してヘッダーリクエスト
+        response = requests.head(url, allow_redirects=True, timeout=10)
+        
+        # ステータスコードチェック
+        if response.status_code != 200:
+            return False, None, f"エラー: サーバーからエラーコード {response.status_code} が返されました"
+            
+        # Content-Lengthの確認
+        content_length = response.headers.get('Content-Length')
+        if content_length is not None:
+            if int(content_length) == 0:
+                return False, None, "エラー: ファイルサイズが0バイトです"
+        
+        # Content-Typeの確認（オプション）
+        content_type = response.headers.get('Content-Type', '')
+        if 'text/html' in content_type.lower():
+            # HTMLページの場合は直接ダウンロード不可の可能性が高い
+            return False, None, "エラー: このURLは直接ダウンロード可能なファイルではありません"
+            
+        # ファイル名の取得
+        filename = None
         if 'Content-Disposition' in response.headers:
             import cgi
             value, params = cgi.parse_header(response.headers['Content-Disposition'])
             if 'filename*' in params:
                 encoding, _, fname = params['filename*'].split("'")
-                return urllib.parse.unquote(fname)
+                filename = urllib.parse.unquote(fname)
             elif 'filename' in params:
-                return params['filename']
-    except:
-        pass
-    return os.path.basename(urllib.parse.unquote(url))
+                filename = params['filename']
+        
+        if not filename:
+            # URLからファイル名を取得
+            filename = os.path.basename(urllib.parse.unquote(url))
+            
+        if not filename:
+            return False, None, "エラー: ファイル名を取得できません"
+            
+        # ファイル名が有効か確認
+        if not any(c not in '<>:"/\\|?*' for c in filename):
+            return False, None, "エラー: 不正なファイル名です"
+            
+        return True, filename, None
+        
+    except requests.Timeout:
+        return False, None, "エラー: サーバーの応答がタイムアウトしました"
+    except requests.RequestException as e:
+        return False, None, f"エラー: 接続エラー: {str(e)}"
+    except Exception as e:
+        return False, None, f"エラー: {str(e)}"
 
 def parse_aria2c_output(line):
-    """aria2cの出力から進捗情報を抽出"""
     try:
         if '[' in line and ']' in line:
             parts = line.split()
@@ -72,14 +108,17 @@ def download_with_aria2c(url, save_path, progress=gr.Progress()):
     if not url.strip():
         return "URLを入力してください"
 
+    # ダウンロード可否とファイル名の確認
+    is_available, filename, error_message = check_download_availability(url)
+    if not is_available:
+        return error_message
+
     downloader.cancelled = False
     
     # 保存先ディレクトリの作成
     save_dir = os.path.abspath(save_path)
     os.makedirs(save_dir, exist_ok=True)
     
-    # ファイル名の取得
-    filename = get_filename_from_url(url)
     full_save_path = os.path.join(save_dir, filename)
     
     command = [
@@ -162,12 +201,10 @@ def on_ui_tabs():
             interactive=False
         )
         
-        # モデルパス設定ボタンのイベント
         ckpt_btn.click(lambda: get_model_path('ckpt'), outputs=save_path_input)
         vae_btn.click(lambda: get_model_path('vae'), outputs=save_path_input)
         lora_btn.click(lambda: get_model_path('lora'), outputs=save_path_input)
         
-        # ダウンロードとキャンセルボタンのイベント
         download_btn.click(
             fn=download_with_aria2c,
             inputs=[url_input, save_path_input],
@@ -181,5 +218,4 @@ def on_ui_tabs():
     
     return [(downloader_interface, "ファイルダウンローダー", "file_downloader_tab")]
 
-# Stable Diffusion Web UIに拡張機能を登録
 script_callbacks.on_ui_tabs(on_ui_tabs)
