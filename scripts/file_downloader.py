@@ -3,6 +3,7 @@ import subprocess
 import urllib.parse
 import requests
 import signal
+import json
 from modules import script_callbacks, shared
 import gradio as gr
 
@@ -13,10 +14,8 @@ class Downloader:
     
     def cancel_download(self):
         if self.process:
-            if os.name == 'nt':
-                self.process.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                self.process.terminate()
+            if os.name == 'nt': self.process.send_signal(signal.CTRL_BREAK_EVENT)
+            else: self.process.terminate()
             self.cancelled = True
             return "ダウンロードをキャンセルしました"
         return "ダウンロードは実行されていません"
@@ -24,39 +23,42 @@ class Downloader:
 downloader = Downloader()
 
 def get_model_path(model_type):
-    paths = {
-        'ckpt': 'models/Stable-diffusion',
-        'vae': 'models/VAE',
-        'lora': 'models/Lora'
-    }
+    paths = {'ckpt': 'models/Stable-diffusion', 'vae': 'models/VAE', 'lora': 'models/Lora'}
     return paths.get(model_type, '')
 
-def check_download_availability(url):
-    """
-    URLのダウンロード可否とファイル名を確認
-    戻り値: (可否, ファイル名, エラーメッセージ)
-    """
+def get_civitai_api_key():
     try:
-        # タイムアウトを設定してヘッダーリクエスト
+        config_path = os.path.join('config', 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                return config.get('custom_api_key', '')
+    except: pass
+    return ''
+
+def modify_civitai_url(url):
+    if 'civitai.com' in url:
+        api_key = get_civitai_api_key()
+        if api_key:
+            separator = '&' if '?' in url else '?'
+            url = f"{url}{separator}token={api_key}"
+    return url
+
+def check_download_availability(url):
+    try:
         response = requests.head(url, allow_redirects=True, timeout=10)
         
-        # ステータスコードチェック
         if response.status_code != 200:
             return False, None, f"エラー: サーバーからエラーコード {response.status_code} が返されました"
             
-        # Content-Lengthの確認
         content_length = response.headers.get('Content-Length')
-        if content_length is not None:
-            if int(content_length) == 0:
-                return False, None, "エラー: ファイルサイズが0バイトです"
+        if content_length is not None and int(content_length) == 0:
+            return False, None, "エラー: ファイルサイズが0バイトです"
         
-        # Content-Typeの確認（オプション）
         content_type = response.headers.get('Content-Type', '')
         if 'text/html' in content_type.lower():
-            # HTMLページの場合は直接ダウンロード不可の可能性が高い
             return False, None, "エラー: このURLは直接ダウンロード可能なファイルではありません"
             
-        # ファイル名の取得
         filename = None
         if 'Content-Disposition' in response.headers:
             import cgi
@@ -68,14 +70,9 @@ def check_download_availability(url):
                 filename = params['filename']
         
         if not filename:
-            # URLからファイル名を取得
             filename = os.path.basename(urllib.parse.unquote(url))
             
-        if not filename:
-            return False, None, "エラー: ファイル名を取得できません"
-            
-        # ファイル名が有効か確認
-        if not any(c not in '<>:"/\\|?*' for c in filename):
+        if not filename or not any(c not in '<>:"/\\|?*' for c in filename):
             return False, None, "エラー: 不正なファイル名です"
             
         return True, filename, None
@@ -92,49 +89,32 @@ def parse_aria2c_output(line):
         if '[' in line and ']' in line:
             parts = line.split()
             for part in parts:
-                if '%' in part:
-                    progress = float(part.strip('%'))
-                if '/s' in part:
-                    speed = part
-                if '(' in part and ')' in part and ':' in part:
-                    eta = part.strip('()')
+                if '%' in part: progress = float(part.strip('%'))
+                if '/s' in part: speed = part
+                if '(' in part and ')' in part and ':' in part: eta = part.strip('()')
             return progress, speed, eta
-    except:
-        pass
+    except: pass
     return None, None, None
 
 def download_with_aria2c(url, save_path, progress=gr.Progress()):
-    """aria2cを使用したダウンロード実装"""
     if not url.strip():
         return "URLを入力してください"
 
-    # ダウンロード可否とファイル名の確認
+    url = modify_civitai_url(url)
     is_available, filename, error_message = check_download_availability(url)
     if not is_available:
         return error_message
 
     downloader.cancelled = False
-    
-    # 保存先ディレクトリの作成
     save_dir = os.path.abspath(save_path)
     os.makedirs(save_dir, exist_ok=True)
-    
     full_save_path = os.path.join(save_dir, filename)
     
     command = [
-        'aria2c',
-        '--summary-interval=1',
-        '-x16',
-        '-s16',
-        '--file-allocation=none',
-        '-k1M',
-        '--max-tries=3',
-        '-m0',
-        '--show-console-readout=true',
-        '--auto-file-renaming=true',
-        '-d', save_dir,
-        '-o', filename,
-        url
+        'aria2c', '--summary-interval=1', '-x16', '-s16',
+        '--file-allocation=none', '-k1M', '--max-tries=3', '-m0',
+        '--show-console-readout=true', '--auto-file-renaming=true',
+        '-d', save_dir, '-o', filename, url
     ]
     
     try:
@@ -179,7 +159,12 @@ def on_ui_tabs():
                 label="ダウンロードURL",
                 placeholder="URLを入力してください"
             )
-        
+            
+        with gr.Row():
+            ckpt_btn = gr.Button("CKPT")
+            vae_btn = gr.Button("VAE")
+            lora_btn = gr.Button("LoRA")
+            
         with gr.Row():
             save_path_input = gr.Textbox(
                 label="保存先フォルダ",
@@ -188,14 +173,9 @@ def on_ui_tabs():
             )
             
         with gr.Row():
-            ckpt_btn = gr.Button("CKPT")
-            vae_btn = gr.Button("VAE")
-            lora_btn = gr.Button("LoRA")
-        
-        with gr.Row():
             download_btn = gr.Button("ダウンロード開始", variant="primary")
             cancel_btn = gr.Button("キャンセル", variant="stop")
-        
+            
         result_text = gr.Textbox(
             label="実行結果",
             interactive=False
