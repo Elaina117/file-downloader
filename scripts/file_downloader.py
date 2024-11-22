@@ -2,82 +2,136 @@ import os
 import subprocess
 import urllib.parse
 import requests
+import signal
+import time
 from modules import script_callbacks, shared
 import gradio as gr
 
+class Downloader:
+    def __init__(self):
+        self.process = None
+        self.cancelled = False
+    
+    def cancel_download(self):
+        if self.process:
+            # Windowsの場合はCTRL_BREAK_EVENT、それ以外はSIGTERM
+            if os.name == 'nt':
+                self.process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                self.process.terminate()
+            self.cancelled = True
+            return "ダウンロードをキャンセルしました"
+        return "ダウンロードは実行されていません"
+
+downloader = Downloader()
+
+def get_model_path(model_type):
+    """モデルタイプに応じたパスを返す"""
+    paths = {
+        'ckpt': 'models/Stable-diffusion',
+        'vae': 'models/VAE',
+        'lora': 'models/Lora'
+    }
+    return paths.get(model_type, '')
+
 def get_filename_from_url(url):
-    """
-    URLからContent-Dispositionヘッダーを取得してファイル名を抽出する
-    ヘッダーが存在しない場合はURLの最後の部分を使用
-    """
+    """URLからファイル名を取得"""
     try:
         response = requests.head(url, allow_redirects=True)
         if 'Content-Disposition' in response.headers:
             import cgi
             value, params = cgi.parse_header(response.headers['Content-Disposition'])
             if 'filename*' in params:
-                # RFC 5987形式のエンコードされたファイル名を処理
                 encoding, _, fname = params['filename*'].split("'")
                 return urllib.parse.unquote(fname)
             elif 'filename' in params:
                 return params['filename']
     except:
         pass
-    
-    # ヘッダーからファイル名を取得できない場合はURLから取得
     return os.path.basename(urllib.parse.unquote(url))
 
+def parse_aria2c_output(line):
+    """aria2cの出力から進捗情報を抽出"""
+    try:
+        if '[' in line and ']' in line:
+            parts = line.split()
+            for part in parts:
+                if '%' in part:
+                    progress = float(part.strip('%'))
+                if '/s' in part:
+                    speed = part
+                if '(' in part and ')' in part and ':' in part:
+                    eta = part.strip('()')
+            return progress, speed, eta
+    except:
+        pass
+    return None, None, None
+
 def download_with_aria2c(url, save_path, progress=gr.Progress()):
-    """
-    aria2cを使用してファイルをダウンロードする
-    """
+    """aria2cを使用したダウンロード実装"""
+    if not url.strip():
+        return "URLを入力してください"
+
+    downloader.cancelled = False
+    
     # 保存先ディレクトリの作成
-    save_dir = os.path.dirname(save_path)
+    save_dir = os.path.abspath(save_path)
     os.makedirs(save_dir, exist_ok=True)
     
     # ファイル名の取得
     filename = get_filename_from_url(url)
     full_save_path = os.path.join(save_dir, filename)
     
-    # aria2cコマンドの設定
     command = [
         'aria2c',
-        '--summary-interval=1',  # 進捗更新間隔
-        '-x16',                  # 最大接続数
-        '-s16',                  # 分割数
-        '--file-allocation=none', # 事前確保なし
-        '-k1M',                  # 分割サイズ
-        '--max-tries=3',         # リトライ回数
-        '-m0',                   # リトライ間隔
-        '--console-log-level=error',
-        '-d', save_dir,         # 保存先ディレクトリ
-        '-o', filename,         # 出力ファイル名
+        '--summary-interval=1',
+        '-x16',
+        '-s16',
+        '--file-allocation=none',
+        '-k1M',
+        '--max-tries=3',
+        '-m0',
+        '--show-console-readout=true',
+        '--auto-file-renaming=true',
+        '-d', save_dir,
+        '-o', filename,
         url
     ]
     
     try:
-        # aria2cプロセスの実行
-        process = subprocess.Popen(
+        downloader.process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True
+            universal_newlines=True,
+            bufsize=1
         )
         
-        progress(0, desc=f"ダウンロード中: {filename}")
+        while True:
+            line = downloader.process.stdout.readline()
+            if not line and downloader.process.poll() is not None:
+                break
+            
+            progress_val, speed, eta = parse_aria2c_output(line)
+            if progress_val is not None:
+                status = f"進捗: {progress_val:.1f}% | 速度: {speed} | 残り時間: {eta}"
+                progress(progress_val / 100, desc=status)
+            
+            if downloader.cancelled:
+                return "ダウンロードがキャンセルされました"
         
-        # プロセスの完了を待機
-        stdout, stderr = process.communicate()
-        
-        if process.returncode == 0:
+        if downloader.process.returncode == 0:
             return f"ダウンロード完了: {full_save_path}"
         else:
+            stderr = downloader.process.stderr.read()
             return f"ダウンロードエラー: {stderr}"
             
     except FileNotFoundError:
-        return "エラー: aria2cがインストールされていません。インストールしてください。"
+        return "エラー: aria2cがインストールされていません"
     except Exception as e:
         return f"エラー: {str(e)}"
+    finally:
+        downloader.process = None
 
 def on_ui_tabs():
     with gr.Blocks(analytics_enabled=False) as downloader_interface:
@@ -86,36 +140,42 @@ def on_ui_tabs():
                 label="ダウンロードURL",
                 placeholder="URLを入力してください"
             )
-            save_path_input = gr.Textbox(
-                label="保存先フォルダ",
-                placeholder="保存先フォルダを入力 (例: models/lora/)",
-                value="downloads/"
-            )
         
         with gr.Row():
-            download_button = gr.Button("ダウンロード開始", variant="primary")
+            save_path_input = gr.Textbox(
+                label="保存先フォルダ",
+                placeholder="保存先フォルダを入力",
+                value="downloads/"
+            )
+            
+        with gr.Row():
+            ckpt_btn = gr.Button("CKPT")
+            vae_btn = gr.Button("VAE")
+            lora_btn = gr.Button("LoRA")
+        
+        with gr.Row():
+            download_btn = gr.Button("ダウンロード開始", variant="primary")
+            cancel_btn = gr.Button("キャンセル", variant="stop")
         
         result_text = gr.Textbox(
             label="実行結果",
             interactive=False
         )
         
-        info_text = gr.Markdown("""
-        ### 使い方
-        1. ダウンロードしたいファイルのURLを入力
-        2. 保存先フォルダを指定
-        3. 「ダウンロード開始」ボタンをクリック
+        # モデルパス設定ボタンのイベント
+        ckpt_btn.click(lambda: get_model_path('ckpt'), outputs=save_path_input)
+        vae_btn.click(lambda: get_model_path('vae'), outputs=save_path_input)
+        lora_btn.click(lambda: get_model_path('lora'), outputs=save_path_input)
         
-        ### 特徴
-        - aria2cによる高速ダウンロード
-        - 自動ファイル名取得
-        - 最大16並列ダウンロード
-        - 自動リトライ機能
-        """)
-        
-        download_button.click(
+        # ダウンロードとキャンセルボタンのイベント
+        download_btn.click(
             fn=download_with_aria2c,
             inputs=[url_input, save_path_input],
+            outputs=result_text
+        )
+        
+        cancel_btn.click(
+            fn=downloader.cancel_download,
             outputs=result_text
         )
     
