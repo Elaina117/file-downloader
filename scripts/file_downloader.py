@@ -154,17 +154,18 @@ def download_with_aria2c(url, save_path, progress=gr.Progress()):
 
 def on_ui_tabs():
     with gr.Blocks(analytics_enabled=False) as downloader_interface:
-        # JavaScript の定義
+        # JavaScript の定義を修正
         gr.HTML("""
             <script>
             function setModelPath(path) {
-                // 保存先フォルダの入力欄を検索
-                const inputs = Array.from(document.getElementsByTagName('input'));
-                const textarea = inputs.find(input => input.placeholder === "保存先フォルダを入力");
+                // textareaタグを検索
+                const textareas = Array.from(document.getElementsByTagName('textarea'));
+                const textarea = textareas.find(el => el.placeholder === "保存先フォルダを入力");
                 if (textarea) {
                     textarea.value = path;
-                    // イベントを発火させて Gradio に変更を通知
-                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                    // 変更イベントを発火
+                    const event = new Event('input', { bubbles: true });
+                    textarea.dispatchEvent(event);
                 }
             }
             </script>
@@ -201,19 +202,19 @@ def on_ui_tabs():
         lora_btn.click(
             fn=None,
             outputs=None,
-            _js="() => setModelPath('models/Lora/')"
+            _js="() => {setModelPath('models/Lora/'); return null;}"
         )
 
         ckpt_btn.click(
             fn=None,
             outputs=None,
-            _js="() => setModelPath('models/Stable-diffusion/')"
+            _js="() => {setModelPath('models/Stable-diffusion/'); return null;}"
         )
 
         vae_btn.click(
             fn=None,
             outputs=None,
-            _js="() => setModelPath('models/VAE/')"
+            _js="() => {setModelPath('models/VAE/'); return null;}"
         )
         
         download_btn.click(
