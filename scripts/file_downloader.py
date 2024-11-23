@@ -28,7 +28,7 @@ def get_model_path(model_type):
 
 def get_civitai_api_key():
     try:
-        config_path = os.path.join('config', 'config.json')
+        config_path = os.path.join(shared.cmd_opts.config, 'config.json')
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
                 config = json.load(f)
@@ -161,9 +161,9 @@ def on_ui_tabs():
             )
             
         with gr.Row():
+            lora_btn = gr.Button("LoRA")
             ckpt_btn = gr.Button("CKPT")
             vae_btn = gr.Button("VAE")
-            lora_btn = gr.Button("LoRA")
             
         with gr.Row():
             save_path_input = gr.Textbox(
@@ -180,10 +180,41 @@ def on_ui_tabs():
             label="実行結果",
             interactive=False
         )
-        
-        ckpt_btn.click(lambda: get_model_path('ckpt'), outputs=save_path_input)
-        vae_btn.click(lambda: get_model_path('vae'), outputs=save_path_input)
-        lora_btn.click(lambda: get_model_path('lora'), outputs=save_path_input)
+
+        # Gradioのカスタムスクリプト追加
+        js_path_setter = downloader_interface.load_js(
+            """
+            function setModelPath(path) {
+                const savePathInput = document.querySelector('#file_downloader_tab textarea[placeholder="保存先フォルダを入力"]');
+                if (savePathInput) {
+                    savePathInput.value = path;
+                    // Gradioのイベントトリガー
+                    savePathInput.dispatchEvent(new Event('input'));
+                }
+            }
+            """
+        )
+
+        lora_btn.click(
+            None, 
+            None, 
+            outputs=save_path_input,
+            js="""() => { setModelPath('models/Lora/'); return []; }"""
+        )
+
+        ckpt_btn.click(
+            None, 
+            None, 
+            outputs=save_path_input,
+            js="""() => { setModelPath('models/Stable-diffusion/'); return []; }"""
+        )
+
+        vae_btn.click(
+            None, 
+            None, 
+            outputs=save_path_input,
+            js="""() => { setModelPath('models/VAE/'); return []; }"""
+        )
         
         download_btn.click(
             fn=download_with_aria2c,
