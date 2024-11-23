@@ -154,6 +154,22 @@ def download_with_aria2c(url, save_path, progress=gr.Progress()):
 
 def on_ui_tabs():
     with gr.Blocks(analytics_enabled=False) as downloader_interface:
+        # JavaScript の定義
+        gr.HTML("""
+            <script>
+            function setModelPath(path) {
+                // 保存先フォルダの入力欄を検索
+                const inputs = Array.from(document.getElementsByTagName('input'));
+                const textarea = inputs.find(input => input.placeholder === "保存先フォルダを入力");
+                if (textarea) {
+                    textarea.value = path;
+                    // イベントを発火させて Gradio に変更を通知
+                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            }
+            </script>
+        """)
+
         with gr.Row():
             url_input = gr.Textbox(
                 label="ダウンロードURL",
@@ -181,39 +197,23 @@ def on_ui_tabs():
             interactive=False
         )
 
-        # Gradioのカスタムスクリプト追加
-        js_path_setter = downloader_interface.load_js(
-            """
-            function setModelPath(path) {
-                const savePathInput = document.querySelector('#file_downloader_tab textarea[placeholder="保存先フォルダを入力"]');
-                if (savePathInput) {
-                    savePathInput.value = path;
-                    // Gradioのイベントトリガー
-                    savePathInput.dispatchEvent(new Event('input'));
-                }
-            }
-            """
-        )
-
+        # モデルパスの設定を JavaScript で処理
         lora_btn.click(
-            None, 
-            None, 
-            outputs=save_path_input,
-            js="""() => { setModelPath('models/Lora/'); return []; }"""
+            fn=None,
+            outputs=None,
+            _js="() => setModelPath('models/Lora/')"
         )
 
         ckpt_btn.click(
-            None, 
-            None, 
-            outputs=save_path_input,
-            js="""() => { setModelPath('models/Stable-diffusion/'); return []; }"""
+            fn=None,
+            outputs=None,
+            _js="() => setModelPath('models/Stable-diffusion/')"
         )
 
         vae_btn.click(
-            None, 
-            None, 
-            outputs=save_path_input,
-            js="""() => { setModelPath('models/VAE/'); return []; }"""
+            fn=None,
+            outputs=None,
+            _js="() => setModelPath('models/VAE/')"
         )
         
         download_btn.click(
